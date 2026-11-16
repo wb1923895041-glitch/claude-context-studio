@@ -1,0 +1,11 @@
+﻿{
+  "mcpServers": {
+    "computer-use": {
+      "command": "cmd",
+      "args": ["/d", "/c", "${PLUGIN_ROOT}\\bin\\start.cmd"],
+      "env": {
+        "ANONYMIZED_TELEMETRY": "false"
+      }
+    }
+  }
+}

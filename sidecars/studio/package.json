@@ -1,0 +1,6 @@
+{
+  "name": "claude_context_studio",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Claude Context Studio sidecar backend"
+}

@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Context Studio</title>
+  <script src="/preload.js"></script>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="studio">
+    <header class="topbar">
+      <select id="conv-select" class="conv-select" aria-label="切换会话"></select>
+      <span id="status-badge" class="status-pill idle" title="当前会话状态"><span class="dot"></span><span id="status-text">空闲</span></span>
+      <button id="btn-refresh" type="button" class="icon-btn" title="刷新" aria-label="刷新">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.35-3.6"/><path d="M13.5 2.5v2.75h-2.75"/></svg>
+      </button>
+    </header>
+
+    <main class="main">
+      <!-- 环境 -->
+      <section class="sec">
+        <h2 class="sec-title">环境</h2>
+        <div id="env-list" class="rows"></div>
+      </section>
+
+      <!-- 电脑操控 -->
+      <section class="sec">
+        <h2 class="sec-title">电脑操控</h2>
+        <div id="cu-rows" class="rows"></div>
+        <figure id="cu-shot" class="cu-shot hidden"></figure>
+        <div class="cu-actions">
+          <button type="button" class="ghost-btn" data-act="cu-look">截屏看看</button>
+          <button type="button" class="ghost-btn" data-act="cu-release">交还控制</button>
+        </div>
+        <div class="cu-hint">Agent 操作时，移动鼠标或按 <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>Backspace</kbd> 可立即收回控制</div>
+      </section>
+
+      <!-- 上下文 -->
+      <section class="sec">
+        <h2 class="sec-title">上下文</h2>
+        <div class="ctx-head">
+          <span id="ctx-used" class="ctx-used">已使用 0%</span>
+          <button id="ctx-cap" type="button" class="ctx-cap" title="点击切换上下文窗口大小">0 / 1M</button>
+        </div>
+        <div id="ctx-bar" class="ctx-bar" aria-label="上下文构成"></div>
+        <div id="ctx-warn" class="ctx-warn hidden"></div>
+        <div id="ctx-rows" class="ctx-rows"></div>
+        <div id="ctx-foot" class="ctx-foot"></div>
+      </section>
+
+      <!-- 执行轨迹 -->
+      <section class="sec">
+        <div class="sec-head">
+          <h2 class="sec-title">执行轨迹</h2>
+          <div class="seg" role="group" aria-label="轨迹筛选">
+            <button type="button" class="seg-btn active" data-tl="all">全部</button>
+            <button type="button" class="seg-btn" data-tl="fail">失败 <span id="fail-count"></span></button>
+          </div>
+        </div>
+        <div id="timeline" class="timeline"></div>
+        <button id="tl-more" type="button" class="more-btn hidden">显示更多</button>
+      </section>
+
+      <!-- 连接器 -->
+      <section class="sec">
+        <h2 class="sec-title">连接器</h2>
+        <div id="connectors" class="rows"></div>
+        <button id="conn-more" type="button" class="more-btn hidden">显示更多</button>
+      </section>
+
+      <!-- 输出内容 -->
+      <section class="sec">
+        <div class="sec-head">
+          <h2 class="sec-title">输出内容</h2>
+          <div class="seg" role="group" aria-label="输出筛选">
+            <button type="button" class="seg-btn active" data-out="files">改过的文件</button>
+            <button type="button" class="seg-btn" data-out="artifacts">产物</button>
+          </div>
+        </div>
+        <div id="outputs" class="rows"></div>
+        <button id="out-more" type="button" class="more-btn hidden">显示更多</button>
+      </section>
+
+      <!-- 规则与快捷指令（折叠） -->
+      <section class="sec">
+        <button id="kb-toggle" type="button" class="sec-toggle" aria-expanded="false">
+          <span class="chev">›</span><span class="sec-title inline">规则与快捷指令</span><span id="kb-meta" class="muted"></span>
+        </button>
+        <div id="kb-body" class="hidden">
+          <div class="sub-title">快捷指令</div>
+          <div id="snippets" class="rows"></div>
+          <button id="btn-new-snippet" type="button" class="more-btn">+ 新增快捷指令</button>
+          <form id="snippet-form" class="editor hidden">
+            <input id="snippet-id" type="hidden">
+            <input id="snippet-title" type="text" placeholder="标题" maxlength="80" required>
+            <textarea id="snippet-content" rows="4" placeholder="要发给 Agent 的内容" required></textarea>
+            <div class="form-actions">
+              <button type="button" id="btn-cancel-snippet" class="ghost-btn">取消</button>
+              <button type="submit" class="primary-btn">保存</button>
+            </div>
+          </form>
+          <div class="sub-title">规则文件</div>
+          <div id="rules" class="rows"></div>
+        </div>
+      </section>
+    </main>
+
+    <div id="preview-backdrop" class="backdrop hidden"></div>
+    <aside id="preview" class="drawer hidden" aria-label="文件预览">
+      <div class="drawer-head">
+        <div class="drawer-title"><strong id="preview-title"></strong><span id="preview-meta" class="muted"></span></div>
+        <button id="preview-open" type="button" class="ghost-btn">在侧栏打开</button>
+        <button id="preview-copy" type="button" class="ghost-btn">复制</button>
+        <button id="preview-close" type="button" class="icon-btn" aria-label="关闭">✕</button>
+      </div>
+      <pre id="preview-body" class="drawer-body"></pre>
+    </aside>
+
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
