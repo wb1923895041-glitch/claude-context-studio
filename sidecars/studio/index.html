@@ -74,7 +74,8 @@
         <div class="sec-head">
           <h2 class="sec-title">输出内容</h2>
           <div class="seg" role="group" aria-label="输出筛选">
-            <button type="button" class="seg-btn active" data-out="files">改过的文件</button>
+            <button type="button" class="seg-btn active" data-out="docs">文档</button>
+            <button type="button" class="seg-btn" data-out="files">改过的文件</button>
             <button type="button" class="seg-btn" data-out="artifacts">产物</button>
           </div>
         </div>
@@ -116,6 +117,24 @@
       </div>
       <pre id="preview-body" class="drawer-body"></pre>
     </aside>
+
+    <!-- 文档预览（docx / xlsx / pptx / pdf） -->
+    <section id="docview" class="docview hidden" aria-label="文档预览">
+      <div class="docview-head">
+        <strong id="docview-title" class="docview-title"></strong>
+        <div class="seg" id="docview-modes">
+          <button type="button" class="seg-btn active" data-mode="fast">快速</button>
+          <button type="button" class="seg-btn" data-mode="hifi" title="用本机 Word 渲染，公式、复杂排版更准确">高保真</button>
+        </div>
+        <button id="docview-reload" type="button" class="icon-btn" title="重新加载" aria-label="重新加载">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.35-3.6"/><path d="M13.5 2.5v2.75h-2.75"/></svg>
+        </button>
+        <button id="docview-external" type="button" class="ghost-btn" title="用默认程序（Word / WPS / Excel）打开">打开</button>
+        <button id="docview-close" type="button" class="icon-btn" aria-label="关闭预览">✕</button>
+      </div>
+      <div id="docview-status" class="docview-status hidden"></div>
+      <div id="docview-body" class="docview-frame" aria-label="文档内容"></div>
+    </section>
 
     <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
   </div>

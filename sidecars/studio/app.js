@@ -20,7 +20,8 @@
     tlFilter: 'all',
     tlLimit: 12,
     connLimit: 5,
-    outTab: 'files',
+    outTab: 'docs',
+    doc: null, // 正在预览的文档 { path, mode }
     outLimit: 5,
     kbOpen: false,
     editingRule: null,
@@ -318,21 +319,139 @@
 
   // ---------- 输出内容 ----------
   function renderOutputs() {
-    const o = state.snap.outputs || { files: [], artifacts: [] };
-    const list = state.outTab === 'files' ? o.files : o.artifacts;
+    const o = state.snap.outputs || { docs: [], files: [], artifacts: [] };
+    const list = (state.outTab === 'docs' ? o.docs : state.outTab === 'files' ? o.files : o.artifacts) || [];
     const shown = list.slice(0, state.outLimit);
     $('out-more').classList.toggle('hidden', list.length <= state.outLimit);
     if (!shown.length) {
-      setHtml('outputs', `<div class="empty">${state.outTab === 'files' ? '本会话还没有修改工作区文件' : '本会话还没有生成产物'}</div>`);
+      const emptyText = { docs: '本会话还没有出现 Word / Excel / PPT / PDF 文档', files: '本会话还没有修改工作区文件', artifacts: '本会话还没有生成产物' }[state.outTab];
+      setHtml('outputs', `<div class="empty">${emptyText}</div>`);
       return;
     }
     setHtml('outputs', shown.map((f) => {
-      const meta = state.outTab === 'files' ? (f.exists ? `改了 ${f.count} 次` : '已删除') : fmtBytes(f.size);
+      const meta = state.outTab === 'files' ? (f.exists ? `改了 ${f.count} 次` : '已删除') : state.outTab === 'docs' ? `${fmtBytes(f.size)} · ${ago(new Date(f.mtime).toISOString())}` : fmtBytes(f.size);
+      if (DOC_RE.test(f.path)) {
+        return `<div class="row clickable" data-doc="${esc(f.path)}" title="${esc(f.path)}（点击预览）">
+        <span class="ico">${ICON.doc}</span><span class="name">${esc(f.label || f.name)}</span>
+        <span class="acts"><button type="button" class="mini-btn" data-external="${esc(f.path)}">用 Word 打开</button><button type="button" class="mini-btn" data-copy="${esc(f.path)}">复制路径</button></span>
+        <span class="val">${esc(meta)}</span></div>`;
+      }
       return `<div class="row clickable" data-open="${esc(f.uri)}" title="${esc(f.path)}">
         <span class="ico">${fileIcon(f.name)}</span><span class="name">${esc(f.label || f.name)}</span>
         <span class="acts"><button type="button" class="mini-btn" data-preview="${esc(f.path)}" data-uri="${esc(f.uri)}" data-name="${esc(f.name)}">预览</button><button type="button" class="mini-btn" data-copy="${esc(f.path)}">复制路径</button></span>
         <span class="val">${esc(meta)}</span></div>`;
     }).join(''));
+  }
+
+  // ---------- 文档预览 ----------
+  const DOC_RE = /\.(docx|docm|xlsx|xlsm|pptx|pptm|pdf)$/i;
+  const baseName = (p) => String(p).split(/[\\/]/).pop();
+
+  function docStatus(text, isErr = false) {
+    const el = $('docview-status');
+    el.textContent = text || '';
+    el.classList.toggle('hidden', !text);
+    el.classList.toggle('err', isErr);
+  }
+
+  // 文档内容放进 Shadow DOM：样式互不干扰，不依赖 iframe（反重力的侧栏可能拦截嵌套页面）
+  function docRoot() {
+    const host = $('docview-body');
+    if (!host.shadowRoot) {
+      const root = host.attachShadow({ mode: 'open' });
+      // Excel 多工作表切换（文档里的脚本不会执行，这里统一处理）
+      root.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-tab]');
+        if (!b) return;
+        root.querySelectorAll('[data-tab]').forEach((x) => x.classList.toggle('on', x === b));
+        root.querySelectorAll('[data-sheet]').forEach((s) => s.classList.toggle('hidden', s.dataset.sheet !== b.dataset.tab));
+      });
+    }
+    return host.shadowRoot;
+  }
+
+  /** 解析返回的整页 HTML：去掉脚本、事件属性和 javascript: 链接，样式里的 body 改成作用于容器。 */
+  function mountHtml(html) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    doc.querySelectorAll('script, iframe, object, embed, link[rel="import"], meta').forEach((n) => n.remove());
+    doc.querySelectorAll('*').forEach((el) => {
+      for (const a of [...el.attributes]) {
+        if (/^on/i.test(a.name)) el.removeAttribute(a.name);
+        else if (/^(href|src|xlink:href|action)$/i.test(a.name) && /^\s*javascript:/i.test(a.value)) el.removeAttribute(a.name);
+      }
+      if (el.tagName === 'A') { el.setAttribute('target', '_blank'); el.setAttribute('rel', 'noopener'); }
+    });
+    const css = [...doc.querySelectorAll('style')].map((s) => s.textContent).join('\n')
+      .replace(/(^|[\s,}])(?:html|body)(?=[\s,{.:#[])/g, '$1.docroot').replace(/:root\b/g, ':host');
+    doc.querySelectorAll('style').forEach((s) => s.remove());
+    docRoot().innerHTML = `<style>.docroot{min-height:100%}${css}</style><div class="docroot">${doc.body.innerHTML}</div>`;
+    $('docview-body').scrollTop = 0;
+  }
+
+  async function fetchText(url) {
+    const r = await sfetch(url, { method: 'GET' });
+    const text = await r.text();
+    if (!r.ok) {
+      let msg = `HTTP ${r.status}`;
+      try { msg = JSON.parse(text).error || msg; } catch {}
+      throw new Error(msg);
+    }
+    return text;
+  }
+
+  async function loadDoc() {
+    const d = state.doc;
+    if (!d) return;
+    document.querySelectorAll('[data-mode]').forEach((b) => b.classList.toggle('active', b.dataset.mode === d.mode));
+    $('docview-modes').classList.toggle('hidden', !/\.(docx|docm)$/i.test(d.path));
+    const bust = Date.now();
+    if (/\.pdf$/i.test(d.path)) {
+      docRoot().innerHTML = '';
+      docStatus('PDF 暂不支持在面板里预览，请点右上角"打开"用默认程序查看。');
+      return;
+    }
+    try {
+      if (d.mode === 'hifi') {
+        docStatus('正在用 Word 渲染……第一次大约需要 5～15 秒，之后直接用缓存。');
+        const r = await apiPost('/api/doc-hifi', { path: d.path });
+        if (state.doc !== d) return;
+        mountHtml(await fetchText(`${r.url}&t=${bust}`));
+      } else {
+        docStatus('正在加载……');
+        const html = await fetchText(`/api/doc?path=${encodeURIComponent(d.path)}&t=${bust}`);
+        if (state.doc !== d) return;
+        mountHtml(html);
+      }
+      docStatus('');
+    } catch (err) {
+      if (state.doc !== d) return;
+      if (d.mode === 'hifi') {
+        docStatus(`高保真渲染失败：${err.message}。已切回快速模式。`, true);
+        d.mode = 'fast';
+        loadDoc();
+      } else {
+        docStatus(`预览失败：${err.message}`, true);
+      }
+    }
+  }
+
+  function openDoc(path, mode = 'fast') {
+    if (!DOC_RE.test(path)) return toast('只支持 docx / xlsx / pptx / pdf');
+    state.doc = { path, mode };
+    $('docview-title').textContent = baseName(path);
+    $('docview-title').title = path;
+    $('docview').classList.remove('hidden');
+    loadDoc();
+  }
+
+  function closeDoc() {
+    state.doc = null;
+    $('docview').classList.add('hidden');
+    if ($('docview-body').shadowRoot) $('docview-body').shadowRoot.innerHTML = '';
+  }
+
+  async function openExternal(path) {
+    try { await apiPost('/api/open-external', { path }); toast('已用默认程序打开'); } catch (err) { toast(`打开失败：${err.message}`); }
   }
 
   // ---------- 规则与快捷指令 ----------
@@ -470,11 +589,13 @@
     });
 
     document.querySelector('.main').addEventListener('click', async (e) => {
-      const el = e.target.closest('[data-copy],[data-preview],[data-open],[data-expand],[data-act],[data-goto-fail],[data-snip-send],[data-snip-new],[data-snip-edit],[data-snip-del],[data-rule-edit],[data-rule-save],[data-rule-cancel]');
+      const el = e.target.closest('[data-external],[data-doc],[data-copy],[data-preview],[data-open],[data-expand],[data-act],[data-goto-fail],[data-snip-send],[data-snip-new],[data-snip-edit],[data-snip-del],[data-rule-edit],[data-rule-save],[data-rule-cancel]');
       if (!el) return;
       const d = el.dataset;
       if (d.preview) { e.stopPropagation(); return openPreview(d.preview, d.uri, d.name); }
       if (d.copy) { e.stopPropagation(); return copy(d.copy, '已复制路径'); }
+      if (d.external) { e.stopPropagation(); return openExternal(d.external); }
+      if (d.doc) return openDoc(d.doc);
       if (d.open) return openFile(d.open);
       if (d.expand) {
         state.expanded.has(d.expand) ? state.expanded.delete(d.expand) : state.expanded.add(d.expand);
@@ -534,8 +655,24 @@
     });
   }
 
+  function bindDocview() {
+    $('docview-close').addEventListener('click', closeDoc);
+    $('docview-reload').addEventListener('click', () => loadDoc());
+    $('docview-external').addEventListener('click', () => state.doc && openExternal(state.doc.path));
+    document.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => {
+      if (!state.doc || state.doc.mode === b.dataset.mode) return;
+      state.doc.mode = b.dataset.mode;
+      loadDoc();
+    }));
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && state.doc) closeDoc(); });
+  }
+
   async function init() {
     bind();
+    bindDocview();
+    // sidecar://claude-context-studio/studio/?preview=<文件路径> 直接打开文档预览
+    const pv = new URLSearchParams(location.search).get('preview');
+    if (pv) openDoc(pv);
     window.sidecar?.onWorkspaceChange?.((uris) => { state.workspaceUris = Array.isArray(uris) ? uris : []; refresh(true); });
     try { const u = await window.sidecar?.getWorkspaceUris?.(); if (Array.isArray(u)) state.workspaceUris = u; } catch {}
     await refresh(true);

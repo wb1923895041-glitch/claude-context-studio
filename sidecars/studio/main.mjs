@@ -6,7 +6,10 @@
  * - 估算上下文构成：系统与内置工具、规则、技能、MCP 工具、对话消息
  * - 汇总环境（工作区、模型）、连接器（MCP）、输出内容（改过的文件 + 产物）
  */
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { copyFileSync, rmSync } from 'node:fs';
+import { renderOfficeFile, openOffice, DOC_EXT, MIME } from './docview.mjs';
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -383,7 +386,25 @@ function newConvState() {
   };
 }
 
+// 会话里出现过的 Office / PDF 文档路径（脚本生成的报告不会出现在"改过的文件"里）
+const DOC_PATH_RE = /(?:file:\/\/\/)?[A-Za-z]:[\\/](?:[^"'`*?<>|\r\n\\/]+[\\/])*[^"'`*?<>|\r\n\\/]+?\.(?:docx|xlsx|pptx|pdf)\b/gi;
+function collectDocs(st, text, at) {
+  if (!text || typeof text !== 'string' || !/\.(docx|xlsx|pptx|pdf)/i.test(text)) return;
+  for (const m of text.matchAll(DOC_PATH_RE)) {
+    let p = m[0];
+    if (p.startsWith('file:///')) { try { p = fileURLToPath(p); } catch { continue; } }
+    p = p.replace(/\\\\/g, '\\');
+    try { p = decodeURIComponent(p); } catch {}
+    const abs = normalizePath(p);
+    if (basename(abs).startsWith('~$')) continue;
+    st.docs.set(abs.toLowerCase(), { path: abs, at });
+  }
+}
+
 function ingestStep(st, step) {
+  st.docs ||= new Map();
+  if (step.type === 'GENERIC' || step.type === 'PLANNER_RESPONSE') collectDocs(st, String(step.content || ''), String(step.created_at || ''));
+  if (step.type === 'PLANNER_RESPONSE' && step.tool_calls) collectDocs(st, typeof step.tool_calls === 'string' ? step.tool_calls : JSON.stringify(step.tool_calls), String(step.created_at || ''));
   st.steps += 1;
   const idx = Number.isFinite(Number(step.step_index)) ? Number(step.step_index) : st.lineNo;
   const type = String(step.type || '');
@@ -748,6 +769,14 @@ function buildSnapshot({ requestedId, hostId, workspaceUris, etag: clientEtag })
 
   const readFiles = [...st.files.values()].filter((f) => f.action === 'read' && !isInside(f.path, GEMINI_DIR)).length;
 
+  // 文档：会话里提到过、且现在还存在的 Office / PDF 文件
+  const docs = [];
+  for (const d of (st.docs || new Map()).values()) {
+    const s = statSafe(d.path);
+    if (s.isFile) docs.push({ name: basename(d.path), path: d.path, uri: toFileUri(d.path), size: s.size, mtime: s.mtime });
+  }
+  docs.sort((a, b) => b.mtime - a.mtime);
+
   return {
     etag,
     conversationId: target.id,
@@ -781,7 +810,7 @@ function buildSnapshot({ requestedId, hostId, workspaceUris, etag: clientEtag })
     },
     timeline: st.timeline.slice(-TIMELINE_MAX).reverse(),
     subagents: st.subagents.slice(-10).reverse(),
-    outputs: { files: outFiles.slice(0, 60), artifacts: arts.slice(0, 60) },
+    outputs: { docs: docs.slice(0, 60), files: outFiles.slice(0, 60), artifacts: arts.slice(0, 60) },
     connectors: eco.mcpServers,
     skills: eco.skills.map(({ name, description, source, disabled, path, uri, tokens }) => ({ name, description, source, disabled, path, uri, tokens })),
     plugins: eco.plugins,
@@ -859,6 +888,126 @@ app.api('/api/preview', (data) => {
     return { path: target, name: basename(target), isBinary: false, size: st.size, content: slice.toString('utf-8'), truncated: buf.length > PREVIEW_MAX_BYTES };
   } catch (err) { return jsonError(500, err.message); }
 }, 'GET');
+
+// ---------------------------------------------------------------------------
+// 文档预览（docx / xlsx / pptx / pdf）
+// ---------------------------------------------------------------------------
+
+const PREVIEW_EXT = /\.(docx|docm|xlsx|xlsm|pptx|pptm|pdf)$/i;
+
+/** 只接受本机绝对路径、文档扩展名、真实存在的文件；跳过 Office 的 ~$ 锁文件。 */
+function checkDocPath(raw) {
+  const p = normalizePath(typeof raw === 'string' ? raw : '');
+  if (!p || !isAbsolute(p) || !PREVIEW_EXT.test(p) || basename(p).startsWith('~$')) return { error: '只能预览本机的 docx / xlsx / pptx / pdf 文件' };
+  const st = statSafe(p);
+  if (!st.isFile) return { error: '文件不存在或已被移动' };
+  return { path: p, st };
+}
+
+const htmlResponse = (html) => new Response(html, { contentType: 'text/html; charset=utf-8' });
+const errorPage = (msg) => htmlResponse(`<!doctype html><meta charset="utf-8"><body style="font:14px system-ui;color:#b42318;padding:24px">${String(msg).replace(/[<&]/g, (c) => (c === '<' ? '&lt;' : '&amp;'))}</body>`);
+
+app.api('/api/doc', (data) => {
+  const chk = checkDocPath(data.path);
+  if (chk.error) return errorPage(chk.error);
+  if (/\.pdf$/i.test(chk.path)) {
+    return new Response(readFileSync(chk.path), { contentType: 'application/pdf' });
+  }
+  try {
+    const enc = encodeURIComponent(chk.path);
+    const mtime = Math.round(chk.st.mtime);
+    return htmlResponse(renderOfficeFile(chk.path, { mtime, toMediaUrl: (part) => `/api/doc-media?path=${enc}&m=${mtime}&part=${encodeURIComponent(part)}` }));
+  } catch (err) {
+    return errorPage(`无法解析这个文件：${err.message}。可以试试"高保真"模式（用 Word 渲染）。`);
+  }
+}, 'GET');
+
+app.api('/api/doc-media', (data) => {
+  const chk = checkDocPath(data.path);
+  if (chk.error) return jsonError(403, chk.error);
+  const part = String(data.part || '');
+  const ext = (part.split('.').pop() || '').toLowerCase();
+  if (!MIME[ext]) return jsonError(400, '不是图片');
+  try {
+    const bytes = openOffice(chk.path, Math.round(chk.st.mtime)).read(part);
+    if (!bytes) return jsonError(404, '找不到图片');
+    return new Response(bytes, { contentType: MIME[ext], headers: { 'Cache-Control': 'max-age=600' } });
+  } catch (err) { return jsonError(500, err.message); }
+}, 'GET');
+
+// 高保真：用 Word 另存为网页
+const HIFI_DIR = join(getDataStorageDir(), 'doc-cache');
+const hifiJobs = new Map();
+
+function runWordExport(src, outDir) {
+  return new Promise((done, fail) => {
+    mkdirSync(outDir, { recursive: true });
+    const copy = join(outDir, `source${extname(src)}`);
+    copyFileSync(src, copy);
+    const out = join(outDir, 'index.htm');
+    const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(__dirname, 'wordhtml.ps1'), '-In', copy, '-Out', out], { windowsHide: true });
+    let err = '';
+    ps.stderr.on('data', (d) => { err += d; });
+    const timer = setTimeout(() => { ps.kill(); fail(new Error('Word 渲染超时（60 秒）')); }, 60000);
+    ps.on('close', (code) => {
+      clearTimeout(timer);
+      try { rmSync(copy, { force: true }); } catch {}
+      if (code === 0 && existsSync(out)) done(out);
+      else fail(new Error(err.trim().split('\n').slice(-2).join(' ') || `Word 渲染失败（退出码 ${code}）`));
+    });
+    ps.on('error', fail);
+  });
+}
+
+app.api('/api/doc-hifi', async (data) => {
+  const chk = checkDocPath(data.path);
+  if (chk.error) return jsonError(400, chk.error);
+  if (!/\.(docx|docm)$/i.test(chk.path)) return jsonError(400, '高保真模式目前只支持 Word 文档');
+  const hash = createHash('sha1').update(`${chk.path}|${chk.st.mtime}|${chk.st.size}`).digest('hex').slice(0, 16);
+  const dir = join(HIFI_DIR, hash);
+  if (!existsSync(join(dir, 'index.htm'))) {
+    if (!hifiJobs.has(hash)) hifiJobs.set(hash, runWordExport(chk.path, dir).finally(() => hifiJobs.delete(hash)));
+    try { await hifiJobs.get(hash); } catch (err) { return jsonError(500, err.message); }
+  }
+  // 只保留最近 10 份缓存
+  try {
+    const all = safeReaddir(HIFI_DIR).map((n) => ({ n, t: statSafe(join(HIFI_DIR, n)).mtime })).sort((a, b) => b.t - a.t);
+    for (const old of all.slice(10)) rmSync(join(HIFI_DIR, old.n), { recursive: true, force: true });
+  } catch {}
+  return { url: `/api/hifi-file?h=${hash}&f=index.htm` };
+}, 'POST');
+
+app.api('/api/hifi-file', (data) => {
+  const h = String(data.h || '');
+  const f = String(data.f || '').replace(/\\/g, '/');
+  if (!/^[0-9a-f]{16}$/.test(h) || f.includes('..') || f.startsWith('/')) return jsonError(400, '参数错误');
+  const p = join(HIFI_DIR, h, f);
+  if (!statSafe(p).isFile) return jsonError(404, '文件不存在');
+  const ext = extname(p).slice(1).toLowerCase();
+  if (ext === 'htm' || ext === 'html') {
+    const buf = readFileSync(p);
+    const head = buf.subarray(0, 2048).toString('latin1');
+    const cs = (head.match(/charset=["']?([\w-]+)/i)?.[1] || 'utf-8').toLowerCase();
+    let html;
+    try { html = new TextDecoder(cs === 'gb2312' ? 'gbk' : cs).decode(buf); } catch { html = buf.toString('utf-8'); }
+    html = html.replace(/<meta[^>]+charset=[^>]+>/gi, '');
+    // Word 导出的网页用相对路径引用图片，改成本接口的地址
+    html = html.replace(/(src|href)="(?!https?:|data:|#|mailto:)([^"]+)"/gi, (m, attr, rel) => `${attr}="/api/hifi-file?h=${h}&f=${encodeURIComponent(decodeURIComponent(rel))}"`);
+    html = html.replace(/<head>/i, '<head><meta charset="utf-8"><style>body{background:#f3f3f1;margin:0}.WordSection1{background:#fff;max-width:860px;margin:16px auto;padding:40px 48px;box-shadow:0 1px 4px rgba(0,0,0,.12)}img{max-width:100%;height:auto}</style>');
+    return htmlResponse(html);
+  }
+  const type = MIME[ext] || (ext === 'css' ? 'text/css' : ext === 'xml' ? 'application/xml' : 'application/octet-stream');
+  return new Response(readFileSync(p), { contentType: type });
+}, 'GET');
+
+// 用默认程序（Word / WPS / Excel …）打开
+app.api('/api/open-external', (data) => {
+  const chk = checkDocPath(data.path);
+  if (chk.error) return jsonError(400, chk.error);
+  // 路径不可能含双引号（Windows 不允许），可以安全地整体加引号
+  spawn('cmd.exe', ['/d', '/c', `start "" "${chk.path}"`], { windowsHide: true, detached: true, stdio: 'ignore', windowsVerbatimArguments: true }).unref();
+  return { ok: true };
+}, 'POST');
 
 // Agent 最近看到的画面（只允许快照里出现过的截图文件）
 app.api('/api/image', (data) => {

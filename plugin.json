@@ -1,7 +1,7 @@
 {
   "name": "claude-context-studio",
   "displayName": "Claude Context Studio",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "仿 Claude 侧栏的右侧面板 + Windows 电脑操控：环境、电脑操控（状态与 Agent 最近看到的画面）、上下文构成（快满预警与一键交接）、可读的执行轨迹、连接器、输出内容、规则与快捷指令。",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
